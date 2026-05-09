@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,11 +28,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -54,59 +56,87 @@ class MainActivity : ComponentActivity() {
 
         val prefs = getSharedPreferences("getui_prefs", MODE_PRIVATE)
         val isOnboardingCompleted = prefs.getBoolean("onboarding_completed", false)
+        val isTileRequested = prefs.getBoolean("tile_requested", false)
 
         setContent {
             GetUITheme {
-                val navController = rememberNavController()
-                val context = LocalContext.current
-                val viewModel: MainViewModel = viewModel()
-                
-                var isServiceEnabled by remember { mutableStateOf(false) }
-                var areNotificationsEnabled by remember { mutableStateOf(true) }
-
-                LaunchedEffect(Unit) {
-                    while (true) {
-                        isServiceEnabled = XmlDumpService.isRunning
-                        areNotificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
-                        delay(1000)
-                    }
-                }
-
-                NavHost(
-                    navController = navController, 
-                    startDestination = if (isOnboardingCompleted && isServiceEnabled) "list" else "onboarding"
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
                 ) {
-                    composable("onboarding") {
-                        OnboardingScreen { 
-                            navController.navigate("permissions") 
+                    val navController = rememberNavController()
+                    val context = LocalContext.current
+                    val viewModel: MainViewModel = viewModel()
+                    
+                    var isServiceEnabled by remember { mutableStateOf(false) }
+                    var areNotificationsEnabled by remember { mutableStateOf(true) }
+
+                    LaunchedEffect(Unit) {
+                        while (true) {
+                            isServiceEnabled = XmlDumpService.isRunning
+                            areNotificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                            delay(1000)
                         }
                     }
-                    composable("permissions") {
-                        PermissionsScreen(
-                            isServiceEnabled = isServiceEnabled,
-                            areNotificationsEnabled = areNotificationsEnabled,
-                            onNext = { 
+
+                    val startDestination = when {
+                        !isOnboardingCompleted -> "onboarding"
+                        !isServiceEnabled -> "permissions"
+                        !isTileRequested -> "tile_request"
+                        else -> "list"
+                    }
+
+                    NavHost(
+                        navController = navController, 
+                        startDestination = startDestination
+                    ) {
+                        composable("onboarding") {
+                            OnboardingScreen { 
                                 prefs.edit().putBoolean("onboarding_completed", true).apply()
-                                navController.navigate("tile_request") 
+                                navController.navigate("permissions") {
+                                    popUpTo("onboarding") { inclusive = true }
+                                }
                             }
-                        )
-                    }
-                    composable("tile_request") {
-                        TileRequestScreen(onNext = { navController.navigate("list") })
-                    }
-                    composable("list") {
-                        DumpListScreen(
-                            viewModel = viewModel,
-                            onDumpClick = { dumpId -> navController.navigate("detail/$dumpId") },
-                            onSettingsClick = { navController.navigate("permissions") }
-                        )
-                    }
-                    composable(
-                        "detail/{dumpId}",
-                        arguments = listOf(navArgument("dumpId") { type = NavType.LongType })
-                    ) { backStackEntry ->
-                        val dumpId = backStackEntry.arguments?.getLong("dumpId") ?: 0L
-                        DumpDetailScreen(dumpId, viewModel, onBack = { navController.popBackStack() })
+                        }
+                        composable("permissions") {
+                            PermissionsScreen(
+                                isServiceEnabled = isServiceEnabled,
+                                areNotificationsEnabled = areNotificationsEnabled,
+                                onNext = { 
+                                    if (!isTileRequested) {
+                                        navController.navigate("tile_request") {
+                                            popUpTo("permissions") { inclusive = true }
+                                        }
+                                    } else {
+                                        navController.navigate("list") {
+                                            popUpTo("permissions") { inclusive = true }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        composable("tile_request") {
+                            TileRequestScreen(onNext = { 
+                                prefs.edit().putBoolean("tile_requested", true).apply()
+                                navController.navigate("list") {
+                                    popUpTo("tile_request") { inclusive = true }
+                                }
+                            })
+                        }
+                        composable("list") {
+                            DumpListScreen(
+                                viewModel = viewModel,
+                                onDumpClick = { dumpId -> navController.navigate("detail/$dumpId") },
+                                onSettingsClick = { navController.navigate("permissions") }
+                            )
+                        }
+                        composable(
+                            "detail/{dumpId}",
+                            arguments = listOf(navArgument("dumpId") { type = NavType.LongType })
+                        ) { backStackEntry ->
+                            val dumpId = backStackEntry.arguments?.getLong("dumpId") ?: 0L
+                            DumpDetailScreen(dumpId, viewModel, onBack = { navController.popBackStack() })
+                        }
                     }
                 }
             }
@@ -336,19 +366,46 @@ fun DumpListScreen(
 }
 
 @Composable
+fun AppIcon(packageName: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val icon = remember(packageName) {
+        try {
+            context.packageManager.getApplicationIcon(packageName).toBitmap().asImageBitmap()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    if (icon != null) {
+        Image(
+            bitmap = icon,
+            contentDescription = null,
+            modifier = modifier
+        )
+    } else {
+        Icon(
+            imageVector = Icons.Default.Description,
+            contentDescription = null,
+            modifier = modifier,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
 fun DumpItem(dump: DumpSummary, onClick: () -> Unit, onDelete: () -> Unit) {
     val date = SimpleDateFormat("MMM dd, yyyy HH:mm:ss", Locale.getDefault()).format(Date(dump.ts))
     
     ListItem(
         modifier = Modifier.clickable { onClick() },
         headlineContent = { Text(dump.appName) },
-        supportingContent = { Text("${dump.packageName}\n$date") },
+        supportingContent = { Text("$date") },
         leadingContent = {
-            Icon(Icons.Default.Description, contentDescription = null)
+            AppIcon(packageName = dump.packageName, modifier = Modifier.size(40.dp))
         },
         trailingContent = {
             IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
+                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
             }
         }
     )
@@ -367,7 +424,15 @@ fun DumpDetailScreen(dumpId: Long, viewModel: MainViewModel, onBack: () -> Unit)
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(dumpEntity?.appName ?: "Detail") },
+                title = { 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (dumpEntity != null) {
+                            AppIcon(packageName = dumpEntity!!.packageName, modifier = Modifier.size(32.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                        }
+                        Text(dumpEntity?.appName ?: "Detail")
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
