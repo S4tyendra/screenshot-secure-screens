@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">GetUI</string>
+    <string name="accessibility_description">Allows the app to dump the UI hierarchy to an XML file.</string>
 </resources>
