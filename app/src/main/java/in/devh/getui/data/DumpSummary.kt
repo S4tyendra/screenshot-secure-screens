@@ -6,5 +6,6 @@ data class DumpSummary(
     val packageName: String,
     val appName: String,
     val html: String,
-    val imgPath: String
+    val imgPath: String,
+    val error: String?
 )

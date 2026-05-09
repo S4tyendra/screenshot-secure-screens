@@ -38,6 +38,15 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/DEPENDENCIES",
+                "META-INF/*.kotlin_module"
+            )
+        }
+    }
 }
 
 dependencies {
@@ -54,6 +63,10 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     implementation(libs.androidx.navigation.compose)
     implementation("androidx.compose.material:material-icons-extended")
+    implementation(libs.google.genai)
+    implementation(libs.gson)
+    implementation("androidx.compose.ui:ui-viewbinding:1.7.0") // Needed for WebView if we use it in Compose
+    implementation("androidx.webkit:webkit:1.12.1")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

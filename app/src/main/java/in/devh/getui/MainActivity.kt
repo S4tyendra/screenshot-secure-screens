@@ -8,6 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +25,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,7 +35,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.FileProvider
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
@@ -40,11 +45,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import `in`.devh.getui.data.DumpEntity
 import `in`.devh.getui.data.DumpSummary
 import `in`.devh.getui.ui.theme.GetUITheme
 import kotlinx.coroutines.delay
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -57,6 +62,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("getui_prefs", MODE_PRIVATE)
         val isOnboardingCompleted = prefs.getBoolean("onboarding_completed", false)
         val isTileRequested = prefs.getBoolean("tile_requested", false)
+        val geminiApiKey = prefs.getString("gemini_api_key", "") ?: ""
 
         setContent {
             GetUITheme {
@@ -80,7 +86,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     val startDestination = when {
-                        !isOnboardingCompleted -> "onboarding"
+                        !isOnboardingCompleted || geminiApiKey.isEmpty() -> "onboarding"
                         !isServiceEnabled -> "permissions"
                         !isTileRequested -> "tile_request"
                         else -> "list"
@@ -91,7 +97,7 @@ class MainActivity : ComponentActivity() {
                         startDestination = startDestination
                     ) {
                         composable("onboarding") {
-                            OnboardingScreen { 
+                            OnboardingScreen(prefs) { 
                                 prefs.edit().putBoolean("onboarding_completed", true).apply()
                                 navController.navigate("permissions") {
                                     popUpTo("onboarding") { inclusive = true }
@@ -127,8 +133,11 @@ class MainActivity : ComponentActivity() {
                             DumpListScreen(
                                 viewModel = viewModel,
                                 onDumpClick = { dumpId -> navController.navigate("detail/$dumpId") },
-                                onSettingsClick = { navController.navigate("permissions") }
+                                onSettingsClick = { navController.navigate("settings") }
                             )
+                        }
+                        composable("settings") {
+                            SettingsScreen(prefs, onBack = { navController.popBackStack() })
                         }
                         composable(
                             "detail/{dumpId}",
@@ -144,8 +153,34 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+const val DEFAULT_SYSTEM_PROMPT = """You are a specialized UI reconstruction engine. Your sole purpose is to convert Android Accessibility XML dumps into static, pixel-perfect HTML/Tailwind representations for screenshot generation.
+
+INPUT:
+Android Accessibility Node XML (containing bounds, text, content-desc, and class names).
+
+ENVIRONMENT & ASSETS:
+The host environment is an offline Android WebView. 
+The host automatically injects Tailwind CSS and Lucide Icons JS. 
+You have access to all standard Tailwind utility classes and Lucide icon names.
+
+OUTPUT REQUIREMENTS:
+1. Output ONLY the raw HTML content that goes inside the <body> tag. Do NOT output ```html markdown blocks, <html>, <head>, or <script> tags.
+2. Use Tailwind CSS classes exclusively for styling. No inline styles unless absolutely necessary for specific absolute positioning based on XML `bounds`.
+3. Map `android.widget.ImageView` or nodes with `content-desc` to Lucide icons using the format: `<i data-lucide="icon-name" class="w-6 h-6 text-gray-500"></i>`. Guess the most appropriate icon based on the `content-desc` or resource ID.
+4. Map `android.widget.TextView` to standard HTML text elements (`<span>`, `<p>`, `<h1>`), applying Tailwind typography classes (text-sm, font-bold, text-gray-900) based on inferred hierarchy.
+5. Use Flexbox (`flex`, `flex-col`, `items-center`, `justify-between`) to recreate the layout structure implied by the XML node hierarchy and bounds. Do not rely strictly on absolute bounds unless the layout is highly complex.
+6. The output must be 100% static. No hover states (`hover:`), no transitions, no interactive JavaScript.
+7. Use standard mobile dimensions (e.g., `w-full`, `max-w-md`, `min-h-screen`, `bg-white`) for the root container.
+
+CONSTRAINTS:
+- ZERO conversational filler.
+- ZERO explanations.
+- Output strictly the HTML string."""
+
 @Composable
-fun OnboardingScreen(onContinue: () -> Unit) {
+fun OnboardingScreen(prefs: android.content.SharedPreferences, onContinue: () -> Unit) {
+    var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "") ?: "") }
+
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
@@ -165,15 +200,91 @@ fun OnboardingScreen(onContinue: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = "This app helps you dump the UI hierarchy of any app to an XML file. You can use it for debugging, automation, or accessibility testing.",
+            text = "To start, please provide your Gemini API Key. This will be used to generate HTML from UI dumps.",
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            label = { Text("Gemini API Key") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
         )
         Spacer(modifier = Modifier.height(48.dp))
         Button(
-            onClick = onContinue,
-            modifier = Modifier.fillMaxWidth()
+            onClick = {
+                if (apiKey.isNotBlank()) {
+                    prefs.edit()
+                        .putString("gemini_api_key", apiKey.trim())
+                        .putString("system_prompt", DEFAULT_SYSTEM_PROMPT)
+                        .apply()
+                    onContinue()
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = apiKey.isNotBlank()
         ) {
             Text("Get Started")
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(prefs: android.content.SharedPreferences, onBack: () -> Unit) {
+    var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "") ?: "") }
+    var systemPrompt by remember { mutableStateOf(prefs.getString("system_prompt", DEFAULT_SYSTEM_PROMPT) ?: DEFAULT_SYSTEM_PROMPT) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    TextButton(onClick = {
+                        prefs.edit()
+                            .putString("gemini_api_key", apiKey.trim())
+                            .putString("system_prompt", systemPrompt)
+                            .apply()
+                        onBack()
+                    }) {
+                        Text("Save")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text("Gemini API Configuration", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                label = { Text("API Key") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("System Prompt", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = systemPrompt,
+                onValueChange = { systemPrompt = it },
+                label = { Text("Prompt") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 10
+            )
         }
     }
 }
@@ -395,13 +506,35 @@ fun AppIcon(packageName: String, modifier: Modifier = Modifier) {
 @Composable
 fun DumpItem(dump: DumpSummary, onClick: () -> Unit, onDelete: () -> Unit) {
     val date = SimpleDateFormat("MMM dd, yyyy HH:mm:ss", Locale.getDefault()).format(Date(dump.ts))
-    
+    val context = LocalContext.current
+
     ListItem(
-        modifier = Modifier.clickable { onClick() },
+        modifier = Modifier.clickable { 
+            if (dump.error != null) {
+                Toast.makeText(context, "Error: ${dump.error}", Toast.LENGTH_LONG).show()
+            } else if (dump.html.isNotEmpty()) {
+                onClick() 
+            } else {
+                Toast.makeText(context, "Processing...", Toast.LENGTH_SHORT).show()
+            }
+        },
         headlineContent = { Text(dump.appName) },
         supportingContent = { Text("$date") },
         leadingContent = {
-            AppIcon(packageName = dump.packageName, modifier = Modifier.size(40.dp))
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(40.dp)) {
+                if (dump.error != null) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "Error",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(40.dp)
+                    )
+                } else if (dump.imgPath.isEmpty()) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                } else {
+                    AppIcon(packageName = dump.packageName, modifier = Modifier.size(40.dp))
+                }
+            }
         },
         trailingContent = {
             IconButton(onClick = onDelete) {
@@ -416,6 +549,7 @@ fun DumpItem(dump: DumpSummary, onClick: () -> Unit, onDelete: () -> Unit) {
 @Composable
 fun DumpDetailScreen(dumpId: Long, viewModel: MainViewModel, onBack: () -> Unit) {
     var dumpEntity by remember { mutableStateOf<DumpEntity?>(null) }
+    val context = LocalContext.current
     
     LaunchedEffect(dumpId) {
         dumpEntity = viewModel.getDumpById(dumpId)
@@ -437,18 +571,72 @@ fun DumpDetailScreen(dumpId: Long, viewModel: MainViewModel, onBack: () -> Unit)
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    if (dumpEntity?.imgPath?.isNotEmpty() == true) {
+                        IconButton(onClick = {
+                            val imageFile = File(dumpEntity!!.imgPath)
+                            if (imageFile.exists()) {
+                                val uri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    imageFile
+                                )
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "image/png"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share UI Image"))
+                            }
+                        }) {
+                            Icon(Icons.Default.Share, contentDescription = "Share")
+                        }
+                    }
                 }
             )
         }
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState())) {
+        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             if (dumpEntity != null) {
-                SelectionContainer {
-                    Text(
-                        text = dumpEntity!!.dump,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(16.dp)
+                if (dumpEntity!!.html.isNotEmpty()) {
+                    val htmlData = """
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+                            <script src="file:///android_asset/tailwindcss.js"></script>
+                            <script src="file:///android_asset/lucide.min.js"></script>
+                        </head>
+                        <body class="bg-gray-50">
+                            ${dumpEntity!!.html}
+                            <script>
+                                lucide.createIcons();
+                            </script>
+                        </body>
+                        </html>
+                    """.trimIndent()
+
+                    AndroidView(
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                settings.javaScriptEnabled = true
+                                settings.allowFileAccess = true
+                                settings.allowContentAccess = true
+                                webViewClient = WebViewClient()
+                                loadDataWithBaseURL("file:///android_asset/", htmlData, "text/html", "UTF-8", null)
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
                     )
+                } else {
+                    SelectionContainer {
+                        Text(
+                            text = dumpEntity!!.dump,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())
+                        )
+                    }
                 }
             } else {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

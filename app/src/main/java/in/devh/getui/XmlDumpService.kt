@@ -155,7 +155,7 @@ class XmlDumpService : AccessibilityService() {
             // Save to Database
             serviceScope.launch {
                 val db = AppDatabase.getDatabase(applicationContext)
-                db.dumpDao().insertDump(
+                val id = db.dumpDao().insertDump(
                     DumpEntity(
                         ts = ts,
                         packageName = packageName,
@@ -163,6 +163,7 @@ class XmlDumpService : AccessibilityService() {
                         dump = xml
                     )
                 )
+                GeminiProcessor(applicationContext).processDump(id)
             }
 
             val msg = "Dump saved for $appName"

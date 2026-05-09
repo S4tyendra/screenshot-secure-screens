@@ -11,5 +11,6 @@ data class DumpEntity(
     val appName: String,
     val dump: String,
     val html: String = "",
-    val imgPath: String = ""
+    val imgPath: String = "",
+    val error: String? = null
 )
