@@ -13,16 +13,32 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
+import android.content.pm.PackageManager
+import `in`.devh.getui.data.AppDatabase
+import `in`.devh.getui.data.DumpEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class XmlDumpService : AccessibilityService() {
+
+    private val serviceScope = CoroutineScope(Dispatchers.IO)
+
+    companion object {
+        @Volatile
+        var isRunning = false
+            private set
+    }
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "in.devh.getui.ACTION_DUMP_XML") {
                 // Dismiss the notification shade to capture the app beneath
-                // This replaces ACTION_CLOSE_SYSTEM_DIALOGS which is restricted on Android 12+
                 performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
                 
                 // Delay slightly to let the shade animation finish before capturing
@@ -34,6 +50,8 @@ class XmlDumpService : AccessibilityService() {
     }
 
     override fun onServiceConnected() {
+        isRunning = true
+        Log.i("XmlDumpService", "Service connected")
         val filter = IntentFilter("in.devh.getui.ACTION_DUMP_XML")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(receiver, filter, RECEIVER_EXPORTED)
@@ -47,6 +65,8 @@ class XmlDumpService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        isRunning = false
+        Log.i("XmlDumpService", "Service destroyed")
         try {
             unregisterReceiver(receiver)
         } catch (e: Exception) {
@@ -58,9 +78,13 @@ class XmlDumpService : AccessibilityService() {
     private fun dumpHierarchy() {
         val rootNode = rootInActiveWindow
         if (rootNode == null) {
-            Toast.makeText(this, "Root node is null (FLAG_SECURE blocks this or screen is transitioning)", Toast.LENGTH_LONG).show()
+            Log.w("XmlDumpService", "Root node is null (FLAG_SECURE or transitioning)")
+            Toast.makeText(this, "Root node is null", Toast.LENGTH_LONG).show()
             return
         }
+
+        val packageName = rootNode.packageName?.toString() ?: "unknown"
+        val appName = getAppName(packageName)
 
         val sb = StringBuilder()
         sb.append("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n")
@@ -68,7 +92,8 @@ class XmlDumpService : AccessibilityService() {
         buildXml(rootNode, sb, "")
         sb.append("</hierarchy>")
 
-        saveToFile(sb.toString())
+        val xmlContent = sb.toString()
+        saveToStorageAndDb(xmlContent, packageName, appName)
         rootNode.recycle()
     }
 
@@ -100,15 +125,53 @@ class XmlDumpService : AccessibilityService() {
             .replace("'", "&apos;")
     }
 
-    private fun saveToFile(xml: String) {
-        try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val file = File(dir, "ui_dump_${System.currentTimeMillis()}.xml")
-            FileWriter(file).use { it.write(xml) }
-            Toast.makeText(this, "Saved to ${file.absolutePath}", Toast.LENGTH_SHORT).show()
+    private fun getAppName(packageName: String): String {
+        val pm = packageManager
+        return try {
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(appInfo).toString()
         } catch (e: Exception) {
-            Log.e("XmlDumpService", "Error saving file", e)
-            Toast.makeText(this, "Error saving file: ${e.message}", Toast.LENGTH_SHORT).show()
+            packageName
+        }
+    }
+
+    private fun saveToStorageAndDb(xml: String, packageName: String, appName: String) {
+        val ts = System.currentTimeMillis()
+        val timestampStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date(ts))
+        
+        try {
+            // Save to app's data directory
+            val dumpDir = File(filesDir, "dumps/$timestampStr")
+            if (!dumpDir.exists()) {
+                dumpDir.mkdirs()
+            }
+
+            val xmlFile = File(dumpDir, "dump.xml")
+            FileWriter(xmlFile).use { it.write(xml) }
+
+            val packageFile = File(dumpDir, "package.txt")
+            FileWriter(packageFile).use { it.write("App Name: $appName\nPackage Name: $packageName\n") }
+
+            // Save to Database
+            serviceScope.launch {
+                val db = AppDatabase.getDatabase(applicationContext)
+                db.dumpDao().insertDump(
+                    DumpEntity(
+                        ts = ts,
+                        packageName = packageName,
+                        appName = appName,
+                        dump = xml
+                    )
+                )
+            }
+
+            val msg = "Dump saved for $appName"
+            Log.i("XmlDumpService", msg)
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e("XmlDumpService", "Error saving dump", e)
         }
     }
 }
